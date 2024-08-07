@@ -1,15 +1,24 @@
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-use std::str::FromStr;
-use winapi::um::ipexport::IP_OPTION_INFORMATION;
-use winapi::um::icmpapi::{IcmpCreateFile, IcmpSendEcho, IcmpCloseHandle, Icmp6CreateFile, Icmp6SendEcho2};
-use winapi::um::handleapi::INVALID_HANDLE_VALUE;
-use winapi::um::errhandlingapi::GetLastError;
-use winapi::shared::ws2ipdef::SOCKADDR_IN6;
-use windows::Win32::Networking::WinSock::SOCKADDR_IN6;
-use crate::errors::{IcmpError, format_error};
+use std::net::{Ipv4Addr, Ipv6Addr};
+
+#[cfg(target_os = "windows")]
+mod windows_specific {
+    pub use winapi::um::icmpapi::{IcmpCreateFile, IcmpSendEcho, IcmpCloseHandle, Icmp6CreateFile, Icmp6SendEcho2};
+    pub use winapi::um::handleapi::INVALID_HANDLE_VALUE;
+    pub use winapi::um::errhandlingapi::GetLastError;
+    pub use winapi::shared::ws2ipdef::SOCKADDR_IN6;
+    pub use winapi::shared::ws2def::AF_INET6;
+    pub use winapi::um::ipexport::{ICMPV6_ECHO_REPLY, ICMP_ECHO_REPLY};
+    pub use winapi::shared::minwindef::{DWORD, LPVOID};
+    pub use winapi::shared::ntdef::NULL;
+    pub use winapi::ctypes::c_void;
+    pub use crate::errors::{IcmpError, format_error};
+}
+
+#[cfg(target_os = "windows")]
+use windows_specific::*;
 
 #[derive(Debug)]
-pub struct PingResult {
+pub struct PingResultV4 {
     pub ip: Ipv4Addr,
     pub status: u32,
     pub data_size: u16,
@@ -19,165 +28,191 @@ pub struct PingResult {
 }
 
 #[derive(Debug)]
+pub struct PingResultV6 {
+    pub ip: Ipv6Addr,
+    pub status: u32,
+    pub round_trip_time: u32,
+    pub error: Option<String>,
+}
+
+#[derive(Debug)]
 pub struct PingConfig {
-    pub count: u32,          // -n count
-    pub size: u16,           // -l size
-    pub ttl: u8,             // -i TTL
-    pub timeout: u32,        // -w timeout
-    pub dont_fragment: bool, // -f
-    pub tos: u8,             // -v TOS
+    pub count: u32,
+    pub size: u16,
+    pub ttl: u8,
+    pub timeout: u32,
+    pub dont_fragment: bool,
+    pub tos: u8,
+}
+
+#[derive(Debug)]
+pub enum PingResult {
+    V4(PingResultV4),
+    V6(PingResultV6),
 }
 
 impl Default for PingConfig {
     fn default() -> Self {
         PingConfig {
-            count: 4,
+            count: 1,
             size: 32,
             ttl: 128,
-            timeout: 1000,
+            timeout: 2000,
             dont_fragment: false,
             tos: 0,
-            // Valores predeterminados para otros parámetros
         }
     }
 }
 
-pub async fn ping_ipv4(ip: Ipv4Addr, config: PingConfig) -> Result<Vec<PingResult>, IcmpError> {
+#[cfg(target_os = "windows")]
+fn create_handle_v4() -> Result<*mut c_void, IcmpError> {
     let handle = unsafe { IcmpCreateFile() };
-    
     if handle == INVALID_HANDLE_VALUE {
-        return Err(IcmpError::CreateHandleError(unsafe { GetLastError() }));
+        Err(IcmpError::CreateHandleError(unsafe { GetLastError() }))
+    } else {
+        Ok(handle as *mut c_void)
     }
-
-    let mut buffer = vec![0u8; config.size as usize]; // Request buffer
-    let mut reply_buffer = vec![0u8; 1024]; // Reply buffer
-
-    let mut results = Vec::new();
-
-    for _ in 0..config.count {
-        let ret = unsafe {
-            IcmpSendEcho(
-                handle,
-                u32::from_ne_bytes(ip.octets()),
-                buffer.as_mut_ptr() as *mut _,
-                buffer.len() as u16,
-                std::ptr::null_mut(),
-                reply_buffer.as_mut_ptr() as *mut _,
-                reply_buffer.len() as u32,
-                config.timeout,
-            )
-        };
-
-        if ret == 0 {
-            let error = unsafe { GetLastError() };
-            results.push(PingResult {
-                ip,
-                status: 0,
-                data_size: 0,
-                round_trip_time: 0,
-                ttl: 0,
-                error: Some(format_error(error)),
-            });
-        } else {
-            let reply = unsafe { &*(reply_buffer.as_ptr() as *const ICMP_ECHO_REPLY) };
-            results.push(PingResult {
-                ip,
-                status: reply.Status,
-                data_size: reply.DataSize,
-                round_trip_time: reply.RoundTripTime,
-                ttl: reply.Options.Ttl,
-                error: if reply.Status == IP_SUCCESS { None } else { Some(format_error(reply.Status)) },
-            });
-        }
-    }
-
-    unsafe { IcmpCloseHandle(handle) };
-
-    Ok(results)
 }
 
-pub async fn ping_ipv6(ip: Ipv6Addr, config: PingConfig) -> Result<Vec<PingResult>, IcmpError> {
+#[cfg(target_os = "windows")]
+fn create_handle_v6() -> Result<*mut c_void, IcmpError> {
     let handle = unsafe { Icmp6CreateFile() };
-    
     if handle == INVALID_HANDLE_VALUE {
-        return Err(IcmpError::CreateHandleError(unsafe { GetLastError() }));
+        Err(IcmpError::CreateHandleError(unsafe { GetLastError() }))
+    } else {
+        Ok(handle as *mut c_void)
     }
+}
 
-    let mut buffer = vec![0u8; config.size as usize]; // Request buffer
-    let mut reply_buffer = vec![0u8; 1024]; // Reply buffer
+#[cfg(target_os = "windows")]
+fn send_ping_v4(handle: *mut c_void, ip: Ipv4Addr, config: &PingConfig, buffer: &mut [u8], reply_buffer: &mut [u8]) -> PingResultV4 {
+    let ret = unsafe {
+        IcmpSendEcho(
+            handle as *mut _,
+            u32::from_ne_bytes(ip.octets()),
+            buffer.as_mut_ptr() as LPVOID,
+            buffer.len() as u16,
+            NULL as *mut _,
+            reply_buffer.as_mut_ptr() as LPVOID,
+            reply_buffer.len() as DWORD,
+            config.timeout,
+        )
+    };
 
-    let mut results = Vec::new();
+    if ret == 0 {
+        let error = unsafe { GetLastError() };
+        PingResultV4 {
+            ip,
+            status: 0,
+            data_size: 0,
+            round_trip_time: 0,
+            ttl: 0,
+            error: Some(format_error(error)),
+        }
+    } else {
+        let reply = unsafe { &*(reply_buffer.as_ptr() as *const ICMP_ECHO_REPLY) };
+        PingResultV4 {
+            ip,
+            status: reply.Status,
+            data_size: reply.DataSize,
+            round_trip_time: reply.RoundTripTime,
+            ttl: reply.Options.Ttl,
+            error: if reply.Status == IP_SUCCESS { None } else { Some(format_error(reply.Status)) },
+        }
+    }
+}
 
+#[cfg(target_os = "windows")]
+fn send_ping_v6(handle: *mut c_void, ip: Ipv6Addr, config: &PingConfig, buffer: &mut [u8], reply_buffer: &mut [u8]) -> PingResultV6 {
     let mut src_saddr = SOCKADDR_IN6::default();
     let mut dst_saddr = SOCKADDR_IN6::default();
 
-    src_saddr.sin6_addr = "";
-    dst_saddr.sin6_addr = ip.octets();
+    dst_saddr.sin6_family = AF_INET6 as u16;
+    dst_saddr.sin6_addr = unsafe { std::mem::transmute(ip.octets()) };
 
-    for _ in 0..config.count {
-        let ret = unsafe {
-            Icmp6SendEcho2(
-                handle,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                &mut src_saddr,
-                &mut dst_saddr,
-                buffer.as_mut_ptr() as *mut _,
-                buffer.len() as u16,
-                std::ptr::null_mut(),
-                reply_buffer.as_mut_ptr() as *mut _,
-                reply_buffer.len() as u32,
-                config.timeout,
-            )
-        };
+    let ret = unsafe {
+        Icmp6SendEcho2(
+            handle as *mut _,
+            NULL as *mut _,
+            NULL as *mut _,
+            NULL as *mut _,
+            &mut src_saddr,
+            &mut dst_saddr,
+            buffer.as_mut_ptr() as LPVOID,
+            buffer.len() as u16,
+            NULL as *mut _,
+            reply_buffer.as_mut_ptr() as LPVOID,
+            reply_buffer.len() as DWORD,
+            config.timeout,
+        )
+    };
 
-        if ret == 0 {
-            let error = unsafe { GetLastError() };
-            results.push(PingResult {
-                ip,
-                status: 0,
-                data_size: 0,
-                round_trip_time: 0,
-                ttl: 0,
-                error: Some(format_error(error)),
-            });
-        } else {
-            let reply = unsafe { &*(reply_buffer.as_ptr() as *const ICMP_ECHO_REPLY) };
-            results.push(PingResult {
-                ip,
-                status: reply.Status,
-                data_size: reply.DataSize,
-                round_trip_time: reply.RoundTripTime,
-                ttl: reply.Options.Ttl,
-                error: if reply.Status == IP_SUCCESS { None } else { Some(format_error(reply.Status)) },
-            });
+    if ret == 0 {
+        let error = unsafe { GetLastError() };
+        PingResultV6 {
+            ip,
+            status: 0,
+            round_trip_time: 0,
+            error: Some(format_error(error)),
+        }
+    } else {
+        let reply = unsafe { &*(reply_buffer.as_ptr() as *const ICMPV6_ECHO_REPLY) };
+        PingResultV6 {
+            ip,
+            status: reply.Status,
+            round_trip_time: reply.RoundTripTime as u32,
+            error: if reply.Status == IP_SUCCESS { None } else { Some(format_error(reply.Status)) },
         }
     }
+}
 
-    unsafe { IcmpCloseHandle(handle) };
+#[cfg(target_os = "windows")]
+pub fn ping_ipv4(ip: Ipv4Addr, config: PingConfig) -> Result<Vec<PingResult>, IcmpError> {
+    let handle = create_handle_v4()?;
+
+    let mut buffer = vec![0u8; config.size as usize];
+    let mut reply_buffer = vec![0u8; 1024];
+
+    let mut results = Vec::new();
+
+    for _ in 0..config.count {
+        results.push(PingResult::V4(send_ping_v4(handle, ip, &config, &mut buffer, &mut reply_buffer)));
+    }
+
+    unsafe { IcmpCloseHandle(handle as *mut _) };
 
     Ok(results)
 }
 
-fn ip_to_u32(ip: IpAddr) -> Result<u32, IcmpError> {
-    match ip {
-        IpAddr::V4(ipv4) => Ok(u32::from_ne_bytes(ipv4.octets())),
-        IpAddr::V6(_) => Err(IcmpError::GeneralError("IPv6 is not supported".to_string())),
+#[cfg(target_os = "windows")]
+pub fn ping_ipv6(ip: Ipv6Addr, config: PingConfig) -> Result<Vec<PingResult>, IcmpError> {
+    let handle = create_handle_v6()?;
+
+    let mut buffer = vec![0u8; config.size as usize];
+    let mut reply_buffer = vec![0u8; 1024];
+
+    let mut results = Vec::new();
+
+    for _ in 0..config.count {
+        results.push(PingResult::V6(send_ping_v6(handle, ip, &config, &mut buffer, &mut reply_buffer)));
     }
+
+    unsafe { IcmpCloseHandle(handle as *mut _) };
+
+    Ok(results)
 }
 
-#[allow(non_snake_case, non_camel_case_types)]
-#[repr(C)]
-struct ICMP_ECHO_REPLY {
-    Address: u32,
-    Status: u32,
-    RoundTripTime: u32,
-    DataSize: u16,
-    Reserved: u16,
-    Data: *mut u8,
-    Options: IP_OPTION_INFORMATION,
-    DataPtr: [u8; 1], // This field is actually a variable-length array
-}
-
+#[cfg(target_os = "windows")]
 const IP_SUCCESS: u32 = 0;
+
+// Aquí es donde puedes agregar el código específico para Linux en el futuro.
+
+#[cfg(not(target_os = "windows"))]
+pub fn ping_ipv4(_ip: Ipv4Addr, _config: PingConfig) -> Result<Vec<PingResult>, IcmpError> {
+    Err(IcmpError::UnsupportedPlatform)
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn ping_ipv6(_ip: Ipv6Addr, _config: PingConfig) -> Result<Vec<PingResult>, IcmpError> {
+    Err(IcmpError::UnsupportedPlatform)
+}
