@@ -1,0 +1,8 @@
+[tasks.install]
+description = "Compila en release y mueve el binario a AppData en Windows"
+script = [
+    "cargo build --release",
+    "powershell -Command \"if (-Not (Test-Path -Path $env:LOCALAPPDATA\\Programs\\Undead34)) { New-Item -ItemType Directory -Path $env:LOCALAPPDATA\\Programs\\Undead34 }\"",
+    "powershell -Command \"Copy-Item -Path target\\release\\undead34.exe -Destination $env:LOCALAPPDATA\\Programs\\Undead34\\ -Force\"",
+    "powershell -Command \"if (-Not ($env:PATH -like '*$env:LOCALAPPDATA\\Programs\\Undead34*')) { [Environment]::SetEnvironmentVariable('PATH', $env:PATH + ';' + $env:LOCALAPPDATA + '\\Programs\\Undead34', 'User') }\""
+]

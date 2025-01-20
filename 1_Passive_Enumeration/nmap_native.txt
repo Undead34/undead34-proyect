@@ -1,0 +1,1 @@
+# Nmap 7.80 scan initiated Mon Jan 20 13:30:21 2025 as: nmap --script http-title,http-server-header -p 80,443 -oN ./1_Passive_Enumeration/nmap_native.txt google.com

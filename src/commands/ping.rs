@@ -1,7 +1,10 @@
-use crate::network::icmp::{ping, PingConfig, PingResult};
+use anyhow::Result;
 use clap::Args;
 use std::io::{self, Write};
 use std::net::IpAddr;
+
+use super::Command;
+use crate::network::icmp::{ping, PingConfig, PingResult};
 
 #[derive(Args, Debug)]
 pub struct PingCommand {
@@ -18,8 +21,8 @@ pub struct PingCommand {
     pub timeout: u32,
 }
 
-impl PingCommand {
-    pub fn execute(&self) {
+impl Command for PingCommand {
+    fn execute(&self) -> Result<()> {
         let config = PingConfig {
             count: self.count,
             size: self.size,
@@ -34,8 +37,12 @@ impl PingCommand {
                 }
             }
         }
-    }
 
+        Ok(())
+    }
+}
+
+impl PingCommand {
     fn ping_and_print(
         &self,
         ip: IpAddr,
